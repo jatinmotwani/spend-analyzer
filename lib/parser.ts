@@ -1,18 +1,17 @@
-// Turns a spoken sentence ("spent 450 at Starbucks and 180 on an auto")
-// into structured spends: amount, title, note, category and date.
+// Rule-based parser: turns "spent 450 at Starbucks and 180 on an auto yesterday"
+// into structured spends. Pure and free: no network, no model calls.
+import { CATEGORY_NAMES, type CategoryId } from './categories';
+import { addDays, parseISODate, toISODate } from './dates';
 
-export const CATEGORIES = [
-  { id: 'food', name: 'Food & Drinks' },
-  { id: 'travel', name: 'Travel' },
-  { id: 'groceries', name: 'Groceries' },
-  { id: 'shopping', name: 'Shopping' },
-  { id: 'bills', name: 'Bills & Home' },
-  { id: 'health', name: 'Health' },
-  { id: 'fun', name: 'Fun' },
-  { id: 'other', name: 'Other' },
-];
+export type ParsedSpend = {
+  amount: number;
+  title: string;
+  note: string;
+  category: CategoryId;
+  date: string; // YYYY-MM-DD
+};
 
-const KEYWORDS = {
+const KEYWORDS: Record<Exclude<CategoryId, 'other'>, string[]> = {
   food: [
     'food', 'lunch', 'dinner', 'breakfast', 'brunch', 'snack', 'coffee', 'tea', 'chai', 'cafe', 'café',
     'restaurant', 'pizza', 'burger', 'biryani', 'dosa', 'idli', 'sandwich', 'meal', 'drink', 'beer',
@@ -21,7 +20,7 @@ const KEYWORDS = {
     'chipotle', 'taco', 'sushi', 'noodle', 'momo', 'samosa', 'canteen', 'dhaba', 'takeaway', 'takeout',
     'doordash', 'uber eats', 'ubereats', 'grubhub', 'deliveroo', 'costa', 'dunkin', 'tim hortons',
     'bistro', 'diner', 'eating out', 'dining', 'thali', 'paratha', 'shawarma', 'pasta', 'chocolate',
-    'cookie', 'donut', 'bagel', 'smoothie', 'boba', 'chaayos', 'haldiram', 'barbeque nation',
+    'cookie', 'donut', 'bagel', 'smoothie', 'boba', 'chaayos', 'haldiram', 'barbeque nation', 'eatsure',
   ],
   travel: [
     'uber', 'ola', 'lyft', 'rapido', 'taxi', 'cab', 'auto', 'rickshaw', 'metro', 'bus', 'train',
@@ -66,7 +65,7 @@ const KEYWORDS = {
 const CURRENCY_WORDS = new Set([
   'rs', 'rs.', 'inr', 'rupee', 'rupees', 'rupay', '₹', '$', 'usd', 'dollar', 'dollars', 'buck', 'bucks',
   'eur', 'euro', 'euros', '€', '£', 'gbp', 'pound', 'pounds', 'quid', 'yen', '¥', 'aed', 'dirham',
-  'dirhams', 'sgd', 'cad', 'aud', 'bob',
+  'dirhams', 'sgd', 'cad', 'aud',
 ]);
 
 const FILLER = new Set([
@@ -75,32 +74,34 @@ const FILLER = new Set([
   'is', 'me', 'my', 'our', 'the', 'a', 'an', 'some', 'around', 'about', 'approx', 'approximately', 'like',
   'total', 'worth', 'of', 'only', 'today', 'tonight', 'this', 'morning', 'evening', 'afternoon', 'had',
   'have', 'has', 'and', 'also', 'plus', 'then', 'so', 'um', 'uh', 'okay', 'ok', 'hey', 'add', 'added',
-  'expense', 'spends', 'amount', 'bill', 'bucks', 'each', 'rupees', 'ordered', 'order', 'took', 'did',
-  'went', 'used', 'using', 'on', 'for', 'at', 'from', 'in', 'to', 'with', 'via', 'by', 'thru', 'through',
+  'expense', 'spends', 'amount', 'bucks', 'each', 'rupees', 'ordered', 'order', 'took', 'did', 'went',
+  'used', 'using', 'on', 'for', 'at', 'from', 'in', 'to', 'with', 'via', 'by', 'thru', 'through',
 ]);
 
 const PLACE_PREPS = new Set(['at', 'from', 'in', '@']);
 const ITEM_PREPS = new Set(['on', 'for', 'to', 'with', 'via', 'by']);
 
-const UNITS = {
+const UNITS: Record<string, number> = {
   zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
   eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17,
   eighteen: 18, nineteen: 19,
 };
-const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
-const SCALES = {
+const TENS: Record<string, number> = {
+  twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+};
+const SCALES: Record<string, number> = {
   hundred: 100, thousand: 1000, grand: 1000, k: 1000, lakh: 1e5, lakhs: 1e5, lac: 1e5, lacs: 1e5,
   million: 1e6, crore: 1e7, crores: 1e7,
 };
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
-const isNumeral = (t) => /^\d+(\.\d+)?$/.test(t);
-const isNumberWord = (t) => t in UNITS || t in TENS;
+const isNumeral = (t: string) => /^\d+(\.\d+)?$/.test(t);
+const isNumberWord = (t: string) => t in UNITS || t in TENS;
 
 /** Replace spelled-out numbers ("two hundred and fifty") with digits ("250"). */
-export function wordsToNumbers(text) {
+export function wordsToNumbers(text: string): string {
   const tokens = text.split(/\s+/).filter(Boolean);
-  const out = [];
+  const out: string[] = [];
   let i = 0;
   while (i < tokens.length) {
     let total = 0;
@@ -118,9 +119,9 @@ export function wordsToNumbers(text) {
         seen = true;
         lastWasScale = false;
       } else if (isNumberWord(t)) {
-        if (seen && !lastWasScale && !(current % 100 >= 20 && current % 10 === 0 && t in UNITS)) {
-          if (!(current >= 100 && current % 100 === 0)) break;
-        }
+        const tensThenUnit = current % 100 >= 20 && current % 10 === 0 && t in UNITS;
+        const afterHundred = current >= 100 && current % 100 === 0;
+        if (seen && !lastWasScale && !tensThenUnit && !afterHundred) break;
         current += t in UNITS ? UNITS[t] : TENS[t];
         seen = true;
         lastWasScale = false;
@@ -153,38 +154,25 @@ export function wordsToNumbers(text) {
   return out.join(' ');
 }
 
-function normalize(text) {
-  return (
-    ` ${text} `
-      .toLowerCase()
-      .replace(/[“”"!?]/g, ' ')
-      .replace(/(\d),(?=\d)/g, '$1') // 1,200 -> 1200
-      .replace(/([₹$€£¥])/g, ' $1 ')
-      .replace(/\brs\.?(?=\d)/g, 'rs ')
-      .replace(/(\d)(rs|inr|usd|eur|gbp|k)\b/g, '$1 $2')
-      .replace(/(\d+(?:\.\d+)?)\s*k\b/g, (_, n) => String(parseFloat(n) * 1000))
-      // sentence punctuation (but keep decimals like 4.50)
-      .replace(/\.(?!\d)/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-  );
+function normalize(text: string): string {
+  return ` ${text} `
+    .toLowerCase()
+    .replace(/[“”"!?()[\]{}<>]/g, ' ')
+    .replace(/(\d),(?=\d)/g, '$1') // 1,200 -> 1200
+    .replace(/([₹$€£¥])/g, ' $1 ')
+    .replace(/\brs\.?(?=\d)/g, 'rs ')
+    .replace(/(\d)(rs|inr|usd|eur|gbp|k)\b/g, '$1 $2')
+    .replace(/(\d+(?:\.\d+)?)\s*k\b/g, (_, n: string) => String(parseFloat(n) * 1000))
+    .replace(/\.(?!\d)/g, ' ') // sentence dots, but keep decimals like 4.50
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function startOfDay(d) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
-}
-
-export function toISODate(d) {
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-
-/** Pull date phrases out of the text; returns { date, text }. */
-function extractDate(text, now) {
-  const today = startOfDay(now);
-  let offset = null;
+function extractDate(text: string, today: string): { date: string; text: string } {
+  const base = parseISODate(today);
+  let offset: number | null = null;
   let t = text;
-  const take = (re, days) => {
+  const take = (re: RegExp, days: number) => {
     if (offset === null && re.test(t)) {
       offset = days;
       t = t.replace(re, ' ');
@@ -196,28 +184,26 @@ function extractDate(text, now) {
   const m = t.match(/\b(?:on |last |this )?(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/);
   if (offset === null && m) {
     const target = WEEKDAYS.indexOf(m[1]);
-    let diff = (today.getDay() - target + 7) % 7;
+    let diff = (base.getDay() - target + 7) % 7;
     if (diff === 0 && /\blast\b/.test(m[0])) diff = 7;
     offset = diff;
     t = t.replace(m[0], ' ');
   }
-  const date = new Date(today);
-  date.setDate(date.getDate() - (offset || 0));
-  return { date: toISODate(date), text: t.replace(/\s+/g, ' ').trim() };
+  return { date: toISODate(addDays(base, -(offset ?? 0))), text: t.replace(/\s+/g, ' ').trim() };
 }
 
-function tokenMatches(token, kw) {
+function tokenMatches(token: string, kw: string) {
   if (token === kw) return true;
-  // tolerate plurals / possessives: coffees, pizzas, dominos's
-  return token.startsWith(kw) && token.length - kw.length <= 2 && kw.length >= 3;
+  // tolerate plurals / possessives: coffees, pizzas
+  return kw.length >= 3 && token.startsWith(kw) && token.length - kw.length <= 2;
 }
 
-export function categorize(text) {
+export function categorize(text: string): CategoryId {
   const lower = ` ${text.toLowerCase()} `;
   const tokens = lower.split(/[^a-z0-9&'@.-]+/).filter(Boolean);
-  let best = 'other';
+  let best: CategoryId = 'other';
   let bestScore = 0;
-  for (const cat of Object.keys(KEYWORDS)) {
+  for (const cat of Object.keys(KEYWORDS) as (keyof typeof KEYWORDS)[]) {
     let score = 0;
     for (const kw of KEYWORDS[cat]) {
       if (kw.includes(' ')) {
@@ -234,18 +220,15 @@ export function categorize(text) {
   return best;
 }
 
-const titleCase = (words) =>
-  words
-    .map((w) => (w.length <= 2 && /\d/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)))
-    .join(' ');
+const titleCase = (words: string[]) =>
+  words.map((w) => (/\d/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1))).join(' ');
 
-function splitSegments(text) {
+function splitSegments(text: string): string[] {
   const parts = text.split(/\s*(?:,|;|\band\b|\balso\b|\bplus\b|\bthen\b)\s*/).filter((p) => p.trim());
-  const segments = [];
+  const segments: string[] = [];
   let pending = '';
   for (const part of parts) {
-    const hasNumber = /\d/.test(part);
-    if (!hasNumber) {
+    if (!/\d/.test(part)) {
       // no amount in this piece: it belongs to a neighbour ("coffee and cake for 300")
       if (segments.length && !pending) segments[segments.length - 1] += ` ${part}`;
       else pending += ` ${part}`;
@@ -258,55 +241,42 @@ function splitSegments(text) {
   return segments.length ? segments : [text];
 }
 
-function parseSegment(segment, date) {
+function parseSegment(segment: string, date: string): ParsedSpend | null {
   const tokens = segment.split(' ').filter(Boolean);
-  const candidates = [];
+  const candidates: { i: number; value: number; withCurrency: boolean }[] = [];
   tokens.forEach((t, i) => {
     if (!isNumeral(t)) return;
     const withCurrency = CURRENCY_WORDS.has(tokens[i - 1]) || CURRENCY_WORDS.has(tokens[i + 1]);
     candidates.push({ i, value: parseFloat(t), withCurrency });
   });
   if (!candidates.length) return null;
-  const chosen =
-    candidates.find((c) => c.withCurrency) || candidates.reduce((a, b) => (b.value > a.value ? b : a));
-  if (!(chosen.value > 0)) return null;
+  const chosen = candidates.find((c) => c.withCurrency) ?? candidates.reduce((a, b) => (b.value > a.value ? b : a));
+  if (!(chosen.value > 0) || chosen.value >= 1e7) return null;
 
-  const rest = tokens.filter((t, i) => i !== chosen.i && !CURRENCY_WORDS.has(t));
-  const place = [];
-  const item = [];
-  let mode = 'item';
-  for (const t of rest) {
-    if (PLACE_PREPS.has(t)) {
-      mode = 'place';
-      continue;
-    }
-    if (ITEM_PREPS.has(t)) {
-      mode = 'item';
-      continue;
-    }
-    if (FILLER.has(t) || /^[^a-z0-9₹$€£¥&]+$/.test(t)) continue;
-    (mode === 'place' ? place : item).push(t.replace(/^[^\w&]+|[^\w&']+$/g, ''));
-  }
-  const clean = (a) => a.filter(Boolean);
-  const placeWords = clean(place);
-  const itemWords = clean(item);
+  const place: string[] = [];
+  const item: string[] = [];
+  let mode: 'place' | 'item' = 'item';
+  tokens.forEach((t, i) => {
+    if (i === chosen.i || CURRENCY_WORDS.has(t)) return;
+    if (PLACE_PREPS.has(t)) return void (mode = 'place');
+    if (ITEM_PREPS.has(t)) return void (mode = 'item');
+    if (FILLER.has(t) || /^[^a-z0-9&]+$/.test(t)) return;
+    const word = t.replace(/^[^\w&]+|[^\w&']+$/g, '');
+    if (word) (mode === 'place' ? place : item).push(word);
+  });
+
   const category = categorize(segment);
-  const catName = CATEGORIES.find((c) => c.id === category).name;
-  const title = placeWords.length ? titleCase(placeWords) : itemWords.length ? titleCase(itemWords) : catName;
-  const note = placeWords.length && itemWords.length ? itemWords.join(' ') : '';
-
+  const title = (place.length ? titleCase(place) : item.length ? titleCase(item) : CATEGORY_NAMES[category]).slice(0, 60);
+  const note = place.length && item.length ? item.join(' ').slice(0, 120) : '';
   return { amount: Math.round(chosen.value * 100) / 100, title, note, category, date };
 }
 
-/**
- * Parse a transcript into zero or more spends.
- * @returns {{amount:number,title:string,note:string,category:string,date:string}[]}
- */
-export function parseSpends(transcript, now = new Date()) {
-  if (!transcript || !transcript.trim()) return [];
-  const { date, text } = extractDate(normalize(transcript), now);
-  const withNumbers = wordsToNumbers(text);
-  return splitSegments(withNumbers)
+/** Parse a transcript into zero or more spends. `today` is the user's local date (YYYY-MM-DD). */
+export function parseSpends(transcript: string, today: string): ParsedSpend[] {
+  if (!transcript?.trim()) return [];
+  const { date, text } = extractDate(normalize(transcript), today);
+  return splitSegments(wordsToNumbers(text))
     .map((seg) => parseSegment(seg, date))
-    .filter(Boolean);
+    .filter((s): s is ParsedSpend => s !== null)
+    .slice(0, 10);
 }
