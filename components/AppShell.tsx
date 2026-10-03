@@ -6,11 +6,13 @@ import { localToday } from '@/lib/dates';
 import { api, ApiError, fetcher, isNetworkError } from '@/lib/client/api';
 import { money } from '@/lib/client/format';
 import { categoryName } from '@/lib/categories';
+import type { Draft } from '@/lib/drafts';
 import type { Spend } from '@/lib/insights';
+import { ConfirmCard, type Pending as Confirming } from './ConfirmCard';
 import { Dock } from './Dock';
 import { EditSheet } from './EditSheet';
 import { Sheet } from './Sheet';
-import { useSpeech } from './useSpeech';
+import { speechLang, useSpeech } from './useSpeech';
 
 export type Me = { username: string; currency: string; monthlyBudget: number };
 
@@ -61,6 +63,9 @@ export function AppShell({ initialMe, children }: { initialMe: Me; children: Rea
   const [typeText, setTypeText] = useState('');
   const [editing, setEditing] = useState<Spend | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState<Confirming | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [places, setPlaces] = useState<string[]>([]);
   const toastTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const toast = useCallback((text: string, action?: Toast['action']) => {
@@ -77,31 +82,20 @@ export function AppShell({ initialMe, children }: { initialMe: Me; children: Rea
     setTypeOpen(true);
   }, []);
 
-  const addFromText = useCallback(
-    async (text: string, source: 'voice' | 'text') => {
+  // 1) parse without saving and show the confirm card
+  const preview = useCallback(
+    async (alternatives: string[], source: 'voice' | 'text') => {
       const today = localToday();
       setBusy(true);
       try {
-        const { created } = await api.post<{ created: Spend[] }>('/api/spends', { text, today, source });
-        await refresh();
-        const first = created[0];
-        const msg =
-          created.length === 1
-            ? `${fmt(first.amount)} · ${first.title} · ${categoryName(first.category)}`
-            : `Added ${created.length} spends · ${fmt(created.reduce((a, s) => a + s.amount, 0))}`;
-        toast(msg, {
-          label: 'Undo',
-          run: async () => {
-            await api.del('/api/spends', { ids: created.map((s) => s.id) });
-            await refresh();
-          },
-        });
+        const { heard, drafts } = await api.post<{ heard: string; drafts: Draft[] }>('/api/spends/preview', { alternatives, today });
+        setConfirming({ heard, source, drafts });
       } catch (e) {
         if (isNetworkError(e)) {
-          writePending([...readPending(), { text, today, source }]);
+          writePending([...readPending(), { text: alternatives[0], today, source }]);
           toast('You’re offline. Saved it, and it will be added when you’re back.');
         } else if (e instanceof ApiError && e.code === 'no_amount') {
-          toast(e.message, { label: 'Edit', run: () => openType(text) });
+          toast(e.message, { label: 'Edit', run: () => openType(alternatives[0]) });
         } else {
           toast(e instanceof ApiError ? e.message : 'Couldn’t add that. Try again.');
         }
@@ -109,14 +103,68 @@ export function AppShell({ initialMe, children }: { initialMe: Me; children: Rea
         setBusy(false);
       }
     },
-    [fmt, openType, refresh, toast],
+    [openType, toast],
+  );
+
+  const addFromText = useCallback((text: string, source: 'voice' | 'text') => preview([text], source), [preview]);
+
+  // 2) save what the user confirmed (or left alone)
+  const save = useCallback(
+    async (drafts: Draft[]) => {
+      if (!confirming || saving) return;
+      if (!drafts.length) return setConfirming(null);
+      setSaving(true);
+      try {
+        const { created } = await api.post<{ created: Spend[] }>('/api/spends', {
+          today: localToday(),
+          source: confirming.source,
+          items: drafts.map((d) => ({
+            amount: d.amount,
+            title: d.title.trim(),
+            note: d.note,
+            category: d.category,
+            date: d.date,
+            heard: confirming.heard,
+          })),
+        });
+        setConfirming(null);
+        await refresh();
+        const first = created[0];
+        toast(
+          created.length === 1
+            ? `Saved ${fmt(first.amount)} · ${first.title}`
+            : `Saved ${created.length} spends · ${fmt(created.reduce((a, s) => a + s.amount, 0))}`,
+          {
+            label: 'Undo',
+            run: async () => {
+              await api.del('/api/spends', { ids: created.map((s) => s.id) });
+              await refresh();
+            },
+          },
+        );
+      } catch (e) {
+        if (isNetworkError(e)) {
+          writePending([...readPending(), { text: confirming.heard, today: localToday(), source: confirming.source }]);
+          setConfirming(null);
+          toast('You’re offline. Saved it, and it will be added when you’re back.');
+        } else {
+          toast(e instanceof ApiError ? e.message : 'Couldn’t save. Try again.');
+        }
+      } finally {
+        setSaving(false);
+      }
+    },
+    [confirming, fmt, refresh, saving, toast],
   );
 
   // keeps the session sliding while the app is in use, and picks up settings changed on another device
   useEffect(() => {
     api
-      .get<Me>('/api/me')
-      .then(({ username, currency, monthlyBudget }) => setMeState({ username, currency, monthlyBudget }))
+      .get<Me & { places?: string[] }>('/api/me')
+      .then(({ username, currency, monthlyBudget, places }) => {
+        setMeState({ username, currency, monthlyBudget });
+        setPlaces(places ?? []);
+      })
       .catch(() => {});
   }, []);
 
@@ -147,12 +195,15 @@ export function AppShell({ initialMe, children }: { initialMe: Me; children: Rea
   }, [refresh, toast]);
 
   const speech = useSpeech({
-    onFinal: (text) => addFromText(text, 'voice'),
+    lang: speechLang(me.currency),
+    phrases: places,
+    onFinal: (alternatives) => preview(alternatives, 'voice'),
     onError: (message) => toast(message, { label: 'Type', run: () => openType() }),
   });
 
   const onMic = useCallback(() => {
     if (speech.listening) return speech.stop();
+    setConfirming(null);
     if (!speech.supported) {
       openType();
       toast('Voice isn’t supported in this browser. Type it instead.');
@@ -199,7 +250,7 @@ export function AppShell({ initialMe, children }: { initialMe: Me; children: Rea
           </div>
         )}
 
-        {toastState && (
+        {toastState && !confirming && (
           <div className="toast" role="status" key={toastState.id}>
             <span className="toast-text">{toastState.text}</span>
             {toastState.action && (
@@ -214,6 +265,17 @@ export function AppShell({ initialMe, children }: { initialMe: Me; children: Rea
               </button>
             )}
           </div>
+        )}
+
+        {confirming && !speech.listening && (
+          <ConfirmCard
+            key={confirming.heard}
+            pending={confirming}
+            currency={me.currency}
+            saving={saving}
+            onSave={save}
+            onDiscard={() => setConfirming(null)}
+          />
         )}
 
         <Dock listening={speech.listening} busy={busy} onMic={onMic} onType={() => openType()} />

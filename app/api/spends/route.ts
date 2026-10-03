@@ -1,9 +1,9 @@
 import { z } from 'zod';
 import { daysBetween, isPlausibleToday, ISO_DATE, parseISODate } from '@/lib/dates';
+import { chooseDrafts, lookupTitles } from '@/lib/drafts';
 import { parseSpends } from '@/lib/parser';
 import { body, fail, json, requireUser, route, tooMany } from '@/lib/server/http';
 import { hit } from '@/lib/server/rate-limit';
-import { CATEGORY_NAMES } from '@/lib/categories';
 import { deleteSpends, insertSpends, learnedCategories, listSpends, MAX_TRANSCRIPT, SpendInput } from '@/lib/server/spends';
 
 export const GET = route(async (req: Request) => {
@@ -41,23 +41,17 @@ export const POST = route(async (req: Request) => {
   const text = input.text?.trim();
   if (!text) return fail(400, 'invalid', 'Say or type what you spent.');
 
-  const parsed = parseSpends(text, input.today);
-  if (!parsed.length) return fail(422, 'no_amount', `Couldn’t find an amount in “${text.slice(0, 80)}”.`);
-
-  // Categories the user has corrected before beat the keyword rules.
-  const generic = new Set(Object.values(CATEGORY_NAMES).map((n) => n.toLowerCase()));
-  const learned = await learnedCategories(
-    user.id,
-    parsed.map((s) => s.title).filter((t) => !generic.has(t.toLowerCase())),
-  );
+  const learned = await learnedCategories(user.id, lookupTitles(parseSpends(text, input.today)));
+  const result = chooseDrafts([text], input.today, learned);
+  if (!result) return fail(422, 'no_amount', `Couldn’t find an amount in “${text.slice(0, 80)}”.`);
 
   const created = await insertSpends(
     user.id,
-    parsed.map((s) => ({
+    result.drafts.map((s) => ({
       amount: s.amount,
       title: s.title,
       note: s.note,
-      category: learned.get(s.title.toLowerCase()) ?? s.category,
+      category: s.category,
       date: s.date,
       heard: text,
       source: input.source,

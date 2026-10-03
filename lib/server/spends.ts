@@ -129,3 +129,14 @@ export async function learnedCategories(userId: string, titles: string[]): Promi
     order by t, n desc, last desc`;
   return new Map(rows.map((r) => [r.t, r.category]));
 }
+
+/** The places the user logs most, used as speech-recognition hints. */
+export async function topPlaces(userId: string, limit = 40): Promise<string[]> {
+  const rows = await sql<{ title: string }>`
+    select min(title) as title from spends
+    where user_id = ${userId}::uuid and spent_on > current_date - 180
+    group by lower(title)
+    order by count(*) desc
+    limit ${limit}`;
+  return rows.map((r) => r.title);
+}

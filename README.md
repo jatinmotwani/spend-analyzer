@@ -115,6 +115,17 @@ Built to run for free:
 - There are no paid APIs. Speech recognition runs in the browser (Chrome, Edge and Safari; Firefox
   falls back to typing).
 
+## How voice entry works
+
+1. **Listening.** The browser's speech engine returns up to 5 guesses for what you said. Accounts
+   in rupees use Indian English (`en-IN`). Where the browser supports recognition hints (newer
+   Chrome), the places you log most are passed in so names like "Chaayos" come through correctly.
+2. **Picking the best guess.** The server parses each guess and keeps the one that has an amount and
+   matches places you've used before (`lib/drafts.ts`). Nothing is saved yet.
+3. **Confirming.** A card shows what was understood: amount, place, category and date. Leave it
+   alone and it saves itself after 4 seconds. Touch anything and the timer stops, so you can fix the
+   amount, rename the place, pick a category or change the date, then tap Save. Discard throws it away.
+
 ## How categorisation works
 
 1. `lib/parser.ts` pulls amounts (`₹1,200`, `2.5k`, *“two hundred and fifty”*), places (*at …*),

@@ -3,11 +3,12 @@ import { endSession, PIN_RE, renewSession, verifyPin } from '@/lib/server/auth';
 import { sql } from '@/lib/server/db';
 import { body, fail, json, requireUser, route, tooMany } from '@/lib/server/http';
 import { hit } from '@/lib/server/rate-limit';
+import { topPlaces } from '@/lib/server/spends';
 
 export const GET = route(async () => {
   const user = await requireUser();
   await renewSession();
-  return json(user);
+  return json({ ...user, places: await topPlaces(user.id) });
 });
 
 const Patch = z.object({
